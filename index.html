@@ -493,7 +493,10 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
           <div class="ad-section-title">Working on now</div>
           <div class="ad-section-desc">Active tasks per person (done items hidden)</div>
           <div class="ad-card" id="adWorkingNow"></div>
-          <div class="ad-section-title" style="margin-top:18px;">Recent activity</div>
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-top:18px;">
+            <div class="ad-section-title" style="margin-top:0;">Recent activity</div>
+            <button class="ad-btn ghost danger" id="adClearActivityBtn">Clear</button>
+          </div>
           <div class="ad-section-desc">Who changed what, most recent first</div>
           <div class="ad-card" id="adActivityLog"></div>
         </div>
@@ -1764,6 +1767,15 @@ Email: caok@wharton.upenn.edu</div>
       stampSync();
     } catch (e) { console.error('Manual sync failed', e); }
     setTimeout(() => btn.classList.remove('spinning'), 600);
+  });
+
+  document.getElementById('adClearActivityBtn').addEventListener('click', async () => {
+    if (!isAdmin()) { alert('Only an admin can clear the activity log.'); return; }
+    if (!state.activityLog.length) return;
+    if (!confirm('Clear the entire recent activity log? This can\'t be undone.')) return;
+    state.activityLog = [];
+    await save('activityLog');
+    renderActivityLog();
   });
 
   (async function init() {
