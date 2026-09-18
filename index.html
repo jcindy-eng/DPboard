@@ -609,6 +609,12 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
   window.dispatchEvent(new Event('firebase-ready'));
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+</script>
 <script>
 (function(){
   const PEOPLE = [
@@ -1468,7 +1474,7 @@ Email: caok@wharton.upenn.edu</div>
         <div class="ad-section-desc">Donors who gave last year but not yet this year — upload Kristina's LYBUNT export, filter by month and/or year, and see totals.</div>
         <div class="ad-campaign-toolbar-row">
           <button class="ad-btn dashed" style="width:auto;" id="adLybuntUploadBtn-${key}">+ Upload LYBUNTS file</button>
-          <input type="file" id="adLybuntUploadInput-${key}" accept=".csv,.xlsx,.xls" style="display:none;">
+          <input type="file" id="adLybuntUploadInput-${key}" accept=".csv,.xlsx,.xls,.pdf" style="display:none;">
           <span class="ad-upload-meta" id="adLybuntMeta-${key}"></span>
           <span style="flex:1;"></span>
           <button class="ad-btn ghost danger" id="adLybuntClear-${key}" style="${isAdmin() ? '' : 'display:none;'}">Clear LYBUNTS data</button>
@@ -1791,6 +1797,21 @@ Email: caok@wharton.upenn.edu</div>
   }
 
   function handleLybuntUpload(key, file) {
+    const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+    if (isPdf) { handleLybuntPdfUpload(key, file); return; }
+    handleLybuntSpreadsheetUpload(key, file);
+  }
+
+  function commitLybuntRows(key, file, rows, meta) {
+    state.lybunts[key] = state.lybunts[key].concat(rows);
+    save('lybunts').then(() => {
+      meta.textContent = `Added ${rows.length} row${rows.length === 1 ? '' : 's'} from ${file.name}`;
+      renderLybuntTable(key);
+      logActivity(`uploaded a LYBUNTS file to ${CAMPAIGN_INFO[key].label} (${rows.length} rows)`);
+    });
+  }
+
+  function handleLybuntSpreadsheetUpload(key, file) {
     const meta = document.getElementById('adLybuntMeta-' + key);
     meta.textContent = 'Reading ' + file.name + '…';
     const reader = new FileReader();
@@ -1817,16 +1838,98 @@ Email: caok@wharton.upenn.edu</div>
             _rowId: uid(), _uploadedAt: uploadedAt, _fileName: file.name, _uploadedBy: currentUser.name,
           };
         });
-        state.lybunts[key] = state.lybunts[key].concat(converted);
-        await save('lybunts');
-        meta.textContent = `Added ${rawRows.length} row${rawRows.length === 1 ? '' : 's'} from ${file.name}`;
-        renderLybuntTable(key);
-        logActivity(`uploaded a LYBUNTS file to ${CAMPAIGN_INFO[key].label} (${rawRows.length} rows)`);
+        commitLybuntRows(key, file, converted, meta);
       } catch (err) {
         meta.textContent = 'Could not read that file — please upload a CSV or Excel export.';
       }
     };
     reader.readAsArrayBuffer(file);
+  }
+
+  // PDFs have no real columns — just text positioned on a page. This reconstructs
+  // a table-like layout (the same trick tools like `pdftotext -layout` use):
+  // place each text run at a character position scaled from its x-coordinate,
+  // so columns that were visually separated end up separated by runs of spaces
+  // in the resulting line of text. Lines are then split on 2+ space gaps to
+  // recover columns, and only lines containing BOTH a dollar amount and a date
+  // are treated as donor rows (this naturally skips titles, headers, and footers).
+  async function extractPdfLines(file) {
+    const buf = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    const AVG_CHAR_WIDTH = 4.3;
+    const allLines = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const items = content.items
+        .filter(it => it.str && it.str.trim().length)
+        .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] }));
+      const rows = {};
+      items.forEach(it => {
+        const key = Math.round(it.y / 2) * 2;
+        (rows[key] = rows[key] || []).push(it);
+      });
+      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
+      ys.forEach(y => {
+        const rowItems = rows[y].sort((a, b) => a.x - b.x);
+        let line = '';
+        rowItems.forEach(it => {
+          const targetPos = Math.max(0, Math.round(it.x / AVG_CHAR_WIDTH));
+          if (line.length < targetPos) line = line.padEnd(targetPos, ' ');
+          line += it.str;
+        });
+        allLines.push(line);
+      });
+    }
+    return allLines;
+  }
+
+  function parseLybuntPdfLines(lines) {
+    const AMOUNT_RE = /\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})/;
+    const DATE_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/;
+    const rows = [];
+    lines.forEach(line => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      if (!AMOUNT_RE.test(trimmed) || !DATE_RE.test(trimmed)) return;
+      const cells = line.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+      const dateCell = cells.find(c => DATE_RE.test(c)) || (trimmed.match(DATE_RE) || [''])[0];
+      const amountCell = cells.find(c => AMOUNT_RE.test(c) && c !== dateCell) || (trimmed.match(AMOUNT_RE) || [''])[0];
+      const remaining = cells.filter(c => c !== dateCell && c !== amountCell);
+      const fullName = remaining[0] || '';
+      const address = remaining.slice(1).join(', ');
+      const parsed = parseGiftDate(dateCell);
+      rows.push({
+        fullName, address,
+        giftAmount: amountCell.replace(/[^0-9.\-]/g, ''),
+        giftDate: dateCell,
+        _month: parsed.month, _year: parsed.year,
+      });
+    });
+    return rows;
+  }
+
+  async function handleLybuntPdfUpload(key, file) {
+    const meta = document.getElementById('adLybuntMeta-' + key);
+    meta.textContent = 'Reading ' + file.name + '… (PDFs take a moment)';
+    try {
+      if (!window.pdfjsLib) { meta.textContent = 'PDF reader failed to load — try refreshing the page.'; return; }
+      const lines = await extractPdfLines(file);
+      const parsed = parseLybuntPdfLines(lines);
+      if (!parsed.length) {
+        console.log('LYBUNTS PDF — no donor-shaped lines found. Raw extracted lines:', lines);
+        meta.textContent = `Couldn't find any rows with both an amount and a date in ${file.name}. Check the browser console (right-click → Inspect → Console) for the raw text — this PDF's layout may need a small adjustment.`;
+        return;
+      }
+      const uploadedAt = todayStr();
+      const converted = parsed.map(r => ({
+        ...r, _rowId: uid(), _uploadedAt: uploadedAt, _fileName: file.name, _uploadedBy: currentUser.name,
+      }));
+      commitLybuntRows(key, file, converted, meta);
+    } catch (err) {
+      console.error('LYBUNTS PDF parse error', err);
+      meta.textContent = 'Could not read that PDF — it may be a scanned image rather than real text.';
+    }
   }
 
   function getFilteredLybunts(key) {
