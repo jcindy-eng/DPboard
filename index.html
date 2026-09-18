@@ -692,18 +692,52 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
     return [];
   }
 
+  function normalizeDonorRow(r) {
+    const alreadyNormalized = ('firstName' in r) || ('lastName' in r) || ('giftAmount' in r) || ('lastGiftDate' in r);
+    if (alreadyNormalized) {
+      return {
+        ...r,
+        firstName: r.firstName || '',
+        lastName: r.lastName || '',
+        giftAmount: r.giftAmount === undefined ? '' : r.giftAmount,
+        lastGiftDate: r.lastGiftDate || '',
+      };
+    }
+    // Legacy row from before columns were fixed — detect and convert on the fly.
+    const rawCols = Object.keys(r).filter(k => k[0] !== '_');
+    const { firstNameCol, lastNameCol, nameCol, amountCol, dateCol } = detectDonorColumns(rawCols);
+    let firstName = '', lastName = '';
+    if (firstNameCol || lastNameCol) {
+      firstName = firstNameCol ? String(r[firstNameCol] === undefined ? '' : r[firstNameCol]) : '';
+      lastName = lastNameCol ? String(r[lastNameCol] === undefined ? '' : r[lastNameCol]) : '';
+    } else if (nameCol) {
+      const split = splitName(r[nameCol]);
+      firstName = split.first; lastName = split.last;
+    }
+    return {
+      firstName, lastName,
+      giftAmount: amountCol ? r[amountCol] : '',
+      lastGiftDate: dateCol ? String(r[dateCol] === undefined ? '' : r[dateCol]) : '',
+      _rowId: r._rowId, _tag: r._tag, _reportDate: r._reportDate, _uploadedAt: r._uploadedAt,
+      _fileName: r._fileName, _taggedBy: r._taggedBy, _uploadedBy: r._uploadedBy,
+    };
+  }
+
   function normalizeState(k) {
     if (k !== 'donorRows') return;
     if (!state.donorRows.annual) state.donorRows.annual = [];
     if (!state.donorRows.capital) state.donorRows.capital = [];
     ['annual', 'capital'].forEach(campKey => {
-      state.donorRows[campKey] = state.donorRows[campKey].map(r => ({
-        ...r,
-        _rowId: r._rowId || uid(),
-        _tag: r._tag || '',
-        _reportDate: r._reportDate || r._uploadedAt || todayStr(),
-        _uploadedAt: r._uploadedAt || todayStr(),
-      }));
+      state.donorRows[campKey] = state.donorRows[campKey].map(r => {
+        const norm = normalizeDonorRow(r);
+        return {
+          ...norm,
+          _rowId: norm._rowId || uid(),
+          _tag: norm._tag || '',
+          _reportDate: norm._reportDate || norm._uploadedAt || todayStr(),
+          _uploadedAt: norm._uploadedAt || todayStr(),
+        };
+      });
     });
   }
 
@@ -1372,6 +1406,7 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
           <button class="ad-btn dashed" style="width:auto;" id="adUploadBtn-${key}">+ Upload weekly report</button>
           <span class="ad-upload-meta" id="adUploadMeta-${key}"></span>
           <span style="flex:1;"></span>
+          <button class="ad-btn ghost" id="adTidyRows-${key}" style="${isAdmin() ? '' : 'display:none;'}" title="Permanently rewrites older uploads into the current First/Last/Amount/Date format">Tidy stored data</button>
           <button class="ad-btn ghost danger" id="adClearRows-${key}" style="${isAdmin() ? '' : 'display:none;'}">Clear all report data</button>
         </div>
         <div id="adUploadForm-${key}"></div>
@@ -1437,6 +1472,16 @@ Email: caok@wharton.upenn.edu</div>
       renderCampaignTable(key);
       renderDonorHighlights(key);
       logActivity(`cleared all report data in ${info.label}`);
+    });
+    document.getElementById('adTidyRows-' + key).addEventListener('click', async () => {
+      if (!isAdmin()) { alert('Only an admin can tidy stored data.'); return; }
+      if (!confirm('This permanently rewrites all uploaded donor rows (both Annual and Capital) into the current First Name / Last Name / Gift Amount / Last Gift Date format, dropping any leftover extra columns from older uploads. This can\'t be undone. Continue?')) return;
+      normalizeState('donorRows');
+      await save('donorRows');
+      renderFilterBatchOptions('annual'); renderFilterBatchOptions('capital');
+      renderCampaignTable('annual'); renderCampaignTable('capital');
+      renderDonorHighlights('annual'); renderDonorHighlights('capital');
+      logActivity(`tidied up stored donor report data (both campaigns)`);
     });
     document.getElementById('adReqBtn-' + key).addEventListener('click', () => toggleRequestForm(key));
 
@@ -1512,18 +1557,36 @@ Email: caok@wharton.upenn.edu</div>
         const data = new Uint8Array(e.target.result);
         const wb = XLSX.read(data, { type: 'array' });
         const sheet = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-        if (!rows.length) { meta.textContent = 'No rows found in ' + file.name + '.'; return; }
+        const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        if (!rawRows.length) { meta.textContent = 'No rows found in ' + file.name + '.'; return; }
         const uploadedAt = todayStr();
-        const tagged = rows.map(r => ({ ...r, _reportDate: reportDate, _uploadedAt: uploadedAt, _fileName: file.name, _rowId: uid(), _tag: '', _uploadedBy: currentUser.name }));
+        const rawCols = [];
+        rawRows.forEach(r => Object.keys(r).forEach(c => { if (rawCols.indexOf(c) === -1) rawCols.push(c); }));
+        const { firstNameCol, lastNameCol, nameCol, amountCol, dateCol } = detectDonorColumns(rawCols);
+        const tagged = rawRows.map(r => {
+          let firstName = '', lastName = '';
+          if (firstNameCol || lastNameCol) {
+            firstName = firstNameCol ? String(r[firstNameCol] === undefined ? '' : r[firstNameCol]) : '';
+            lastName = lastNameCol ? String(r[lastNameCol] === undefined ? '' : r[lastNameCol]) : '';
+          } else if (nameCol) {
+            const split = splitName(r[nameCol]);
+            firstName = split.first; lastName = split.last;
+          }
+          return {
+            firstName, lastName,
+            giftAmount: amountCol ? r[amountCol] : '',
+            lastGiftDate: dateCol ? String(r[dateCol] === undefined ? '' : r[dateCol]) : '',
+            _reportDate: reportDate, _uploadedAt: uploadedAt, _fileName: file.name, _rowId: uid(), _tag: '', _uploadedBy: currentUser.name,
+          };
+        });
         state.donorRows[key] = state.donorRows[key].concat(tagged);
         await save('donorRows');
-        meta.textContent = `Added ${rows.length} row${rows.length === 1 ? '' : 's'} from ${file.name} — report date ${fmtDate(reportDate)}`;
+        meta.textContent = `Added ${rawRows.length} row${rawRows.length === 1 ? '' : 's'} from ${file.name} — report date ${fmtDate(reportDate)}`;
         if (formWrap) formWrap.innerHTML = '';
         renderFilterBatchOptions(key);
         renderCampaignTable(key);
         renderDonorHighlights(key);
-        logActivity(`uploaded a weekly report to ${CAMPAIGN_INFO[key].label} (${rows.length} rows, report date ${fmtDate(reportDate)})`);
+        logActivity(`uploaded a weekly report to ${CAMPAIGN_INFO[key].label} (${rawRows.length} rows, report date ${fmtDate(reportDate)})`);
       } catch (err) {
         meta.textContent = 'Could not read that file — please upload a CSV or Excel export.';
       }
@@ -1551,7 +1614,8 @@ Email: caok@wharton.upenn.edu</div>
     else if (f.tag) rows = rows.filter(r => r._tag === f.tag);
     if (f.search) {
       const q = f.search.toLowerCase();
-      rows = rows.filter(r => Object.keys(r).some(k => k[0] !== '_' && String(r[k]).toLowerCase().indexOf(q) !== -1));
+      rows = rows.filter(r => [r.firstName, r.lastName, r.giftAmount, r.lastGiftDate, r._fileName]
+        .some(v => String(v === undefined || v === null ? '' : v).toLowerCase().indexOf(q) !== -1));
     }
     return rows;
   }
@@ -1586,13 +1650,10 @@ Email: caok@wharton.upenn.edu</div>
     const allRows = state.donorRows[key] || [];
     if (!allRows.length) { container.innerHTML = '<div class="ad-empty">No reports uploaded yet.</div>'; return; }
     const rows = getFilteredCampaignRows(key);
-    const cols = [];
-    allRows.forEach(r => Object.keys(r).forEach(k => { if (k[0] !== '_' && cols.indexOf(k) === -1) cols.push(k); }));
-    const { amountCol } = detectDonorColumns(cols);
     if (!rows.length) { container.innerHTML = '<div class="ad-empty">No rows match these filters.</div>'; return; }
-    let html = '<div class="ad-spreadsheet-wrap"><table class="ad-spreadsheet"><thead><tr><th>Tag</th>';
-    cols.forEach(c => html += `<th>${esc(c)}</th>`);
-    html += '<th>Report Date</th><th>Uploaded</th><th>Source File</th></tr></thead><tbody>';
+    let html = '<div class="ad-spreadsheet-wrap"><table class="ad-spreadsheet"><thead><tr>';
+    html += '<th>Tag</th><th>First Name</th><th>Last Name</th><th>Gift Amount</th><th>Last Gift Date</th><th>Report Date</th><th>Uploaded</th><th>Source File</th>';
+    html += '</tr></thead><tbody>';
     rows.forEach(r => {
       html += '<tr><td><div class="ad-tag-btn-group">';
       TAG_DEFS.forEach(t => {
@@ -1601,11 +1662,7 @@ Email: caok@wharton.upenn.edu</div>
         html += `<button class="ad-tag-btn ${isActive ? 'active-' + t.key : ''}" data-row-id="${r._rowId || ''}" data-tag="${t.key}" title="${esc(tip)}">${t.short}</button>`;
       });
       html += '</div></td>';
-      cols.forEach(c => {
-        const raw = r[c] === undefined ? '' : r[c];
-        const display = (c === amountCol) ? fmtCurrency(raw) : String(raw);
-        html += `<td>${esc(display)}</td>`;
-      });
+      html += `<td>${esc(r.firstName || '')}</td><td>${esc(r.lastName || '')}</td><td>${esc(fmtCurrency(r.giftAmount))}</td><td>${esc(r.lastGiftDate || '')}</td>`;
       html += `<td>${esc(fmtDate(r._reportDate || ''))}</td><td>${esc(fmtDate(r._uploadedAt || ''))}</td><td>${esc(r._fileName || '')}</td></tr>`;
     });
     html += '</tbody></table></div>';
@@ -1620,9 +1677,6 @@ Email: caok@wharton.upenn.edu</div>
       container.innerHTML = '<div class="ad-empty">No donors tagged yet — use the HP / New / Rec buttons in the report table above.</div>';
       return;
     }
-    const cols = [];
-    allRows.forEach(r => Object.keys(r).forEach(k => { if (k[0] !== '_' && cols.indexOf(k) === -1) cols.push(k); }));
-    const { firstNameCol, lastNameCol, nameCol, amountCol, dateCol } = detectDonorColumns(cols);
     const order = { high: 0, new: 1, recurring: 2 };
     const sorted = [...tagged].sort((a, b) => (order[a._tag] ?? 9) - (order[b._tag] ?? 9));
     let html = '<div class="ad-spreadsheet-wrap"><table class="ad-spreadsheet"><thead><tr>';
@@ -1630,18 +1684,8 @@ Email: caok@wharton.upenn.edu</div>
     html += '</tr></thead><tbody>';
     sorted.forEach(r => {
       const t = TAG_DEFS.find(t => t.key === r._tag);
-      let first = '', last = '';
-      if (firstNameCol || lastNameCol) {
-        first = firstNameCol ? String(r[firstNameCol] === undefined ? '' : r[firstNameCol]) : '';
-        last = lastNameCol ? String(r[lastNameCol] === undefined ? '' : r[lastNameCol]) : '';
-      } else if (nameCol) {
-        const split = splitName(r[nameCol]);
-        first = split.first; last = split.last;
-      }
-      const amountDisplay = amountCol ? fmtCurrency(r[amountCol]) : '';
-      const dateDisplay = dateCol ? String(r[dateCol] === undefined ? '' : r[dateCol]) : '';
       html += `<tr><td><span class="ad-badge" style="background:${t.bg};color:${t.fg};">${esc(t.label)}</span></td>`;
-      html += `<td>${esc(first)}</td><td>${esc(last)}</td><td>${esc(amountDisplay)}</td><td>${esc(dateDisplay)}</td></tr>`;
+      html += `<td>${esc(r.firstName || '')}</td><td>${esc(r.lastName || '')}</td><td>${esc(fmtCurrency(r.giftAmount))}</td><td>${esc(r.lastGiftDate || '')}</td></tr>`;
     });
     html += '</tbody></table></div>';
     container.innerHTML = html;
