@@ -151,6 +151,7 @@
 .ad-btn.primary:hover { background: #2947CC; }
 .ad-btn.ghost { border: none; background: none; color: var(--blue); padding: 2px 4px; }
 .ad-btn.ghost.danger { color: var(--red); }
+.ad-toggle-active { background: var(--blue-soft) !important; color: var(--blue) !important; }
 .ad-btn.dashed {
   width: 100%; background: none; border: 1px dashed var(--border); color: var(--text-soft);
   padding: 8px; border-radius: 6px; font-size: 12.5px; font-weight: 600;
@@ -671,12 +672,12 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
     { title: 'AI Newsroom Tool', type: 'Other', ask: '$12,000–$18,000', description: "One-year pilot with a Penn student developer to build AI monitoring/aggregation of Penn coverage across outlets. Deliverable: working tool + editorial impact report at year-end." },
   ];
 
-  let state = { tasks: [], events: [], ideas: [], decisions: [], donorRows: {}, activityLog: [] };
+  let state = { tasks: [], events: [], ideas: [], decisions: [], donorRows: {}, activityLog: [], lybunts: {} };
   let nextId = 1;
   const uid = () => 'id' + (nextId++) + '-' + Math.random().toString(36).slice(2,7);
   let currentUser = { name: '', role: '' };
   const ROLE_OPTIONS = ['Kristina', 'Itamar', 'Lexi', 'Yasha', 'Admin / Manager'];
-  const STORAGE_KEYS = ['tasks', 'events', 'ideas', 'decisions', 'donorRows', 'activityLog'];
+  const STORAGE_KEYS = ['tasks', 'events', 'ideas', 'decisions', 'donorRows', 'activityLog', 'lybunts'];
 
   function waitForFirebase() {
     return new Promise((resolve) => {
@@ -689,6 +690,7 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
     if (k === 'tasks') return SEED_TASKS.map(t => ({ ...t, id: uid() }));
     if (k === 'ideas') return SEED_IDEAS.map(i => ({ ...i, id: uid(), votes: 0, starred: false, targetDate: '', addedToCalendar: false }));
     if (k === 'donorRows') return { annual: [], capital: [] };
+    if (k === 'lybunts') return { annual: [], capital: [] };
     return [];
   }
 
@@ -724,21 +726,34 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
   }
 
   function normalizeState(k) {
-    if (k !== 'donorRows') return;
-    if (!state.donorRows.annual) state.donorRows.annual = [];
-    if (!state.donorRows.capital) state.donorRows.capital = [];
-    ['annual', 'capital'].forEach(campKey => {
-      state.donorRows[campKey] = state.donorRows[campKey].map(r => {
-        const norm = normalizeDonorRow(r);
-        return {
-          ...norm,
-          _rowId: norm._rowId || uid(),
-          _tag: norm._tag || '',
-          _reportDate: norm._reportDate || norm._uploadedAt || todayStr(),
-          _uploadedAt: norm._uploadedAt || todayStr(),
-        };
+    if (k === 'donorRows') {
+      if (!state.donorRows.annual) state.donorRows.annual = [];
+      if (!state.donorRows.capital) state.donorRows.capital = [];
+      ['annual', 'capital'].forEach(campKey => {
+        state.donorRows[campKey] = state.donorRows[campKey].map(r => {
+          const norm = normalizeDonorRow(r);
+          return {
+            ...norm,
+            _rowId: norm._rowId || uid(),
+            _tag: norm._tag || '',
+            _reportDate: norm._reportDate || norm._uploadedAt || todayStr(),
+            _uploadedAt: norm._uploadedAt || todayStr(),
+          };
+        });
       });
-    });
+      return;
+    }
+    if (k === 'lybunts') {
+      if (!state.lybunts.annual) state.lybunts.annual = [];
+      if (!state.lybunts.capital) state.lybunts.capital = [];
+      ['annual', 'capital'].forEach(campKey => {
+        state.lybunts[campKey] = state.lybunts[campKey].map(r => ({
+          ...r,
+          _rowId: r._rowId || uid(),
+        }));
+      });
+      return;
+    }
   }
 
   const loadedKeysOnce = new Set();
@@ -1383,8 +1398,8 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
     { key: 'recurring', label: 'Recurring Donor', short: 'Rec', bg: 'var(--green-soft)', fg: 'var(--green)' },
   ];
   const campaignFilters = {
-    annual: { search: '', from: '', to: '', batch: '', tag: '' },
-    capital: { search: '', from: '', to: '', batch: '', tag: '' },
+    annual: { search: '', from: '', to: '', batch: '', tag: '', showAll: false },
+    capital: { search: '', from: '', to: '', batch: '', tag: '', showAll: false },
   };
   function refreshCampaignRequestLists() { renderRequestList('annual'); renderRequestList('capital'); }
 
@@ -1420,9 +1435,11 @@ table.ad-spreadsheet tr:nth-child(even) td { background: #FBFBFC; }
             ${TAG_DEFS.map(t => `<option value="${t.key}">${t.label} only</option>`).join('')}
             <option value="__untagged">Untagged only</option>
           </select>
+          <button class="ad-btn ghost" id="adShowAllBtn-${key}">Show All</button>
           <button class="ad-btn ghost" id="adFilterClear-${key}">Clear filters</button>
         </div>
         <div class="ad-section-desc" style="margin-top:6px;">Use the tag buttons in each row (HP / New / Rec) to mark high-potential, new, and recurring donors as you review the report.</div>
+        <div class="ad-upload-meta" id="adTableScopeNote-${key}" style="margin-bottom:6px;"></div>
         <div id="adCampaignTable-${key}"></div>
       </div>
 
@@ -1445,9 +1462,71 @@ Email: caok@wharton.upenn.edu</div>
         <div class="ad-section-desc">High-potential, new, and recurring donors Itamar has flagged in the report above.</div>
         <div class="ad-card" id="adHighlights-${key}"></div>
       </div>
+
+      <div class="ad-campaign-block">
+        <div class="ad-section-title" style="font-size:14px;">LYBUNTS</div>
+        <div class="ad-section-desc">Donors who gave last year but not yet this year — upload Kristina's LYBUNT export, filter by month and/or year, and see totals.</div>
+        <div class="ad-campaign-toolbar-row">
+          <button class="ad-btn dashed" style="width:auto;" id="adLybuntUploadBtn-${key}">+ Upload LYBUNTS file</button>
+          <input type="file" id="adLybuntUploadInput-${key}" accept=".csv,.xlsx,.xls" style="display:none;">
+          <span class="ad-upload-meta" id="adLybuntMeta-${key}"></span>
+          <span style="flex:1;"></span>
+          <button class="ad-btn ghost danger" id="adLybuntClear-${key}" style="${isAdmin() ? '' : 'display:none;'}">Clear LYBUNTS data</button>
+        </div>
+        <div class="ad-campaign-toolbar-row">
+          <input type="text" class="ad-filter-input" id="adLybuntSearch-${key}" placeholder="Search name or address…" style="max-width:200px;">
+          <label class="ad-filter-label">Month
+            <select class="ad-filter-input" id="adLybuntMonth-${key}">
+              <option value="">All</option>
+              ${MONTH_NAMES.map((m, i) => `<option value="${i + 1}">${m}</option>`).join('')}
+            </select>
+          </label>
+          <label class="ad-filter-label">Year <input type="text" class="ad-filter-input" id="adLybuntYear-${key}" placeholder="e.g. 2025" style="max-width:90px;"></label>
+          <button class="ad-btn ghost" id="adLybuntClearFilters-${key}">Clear filters</button>
+        </div>
+        <div class="ad-upload-meta" id="adLybuntTotal-${key}" style="margin-bottom:6px;font-weight:600;color:var(--text);"></div>
+        <div id="adLybuntTable-${key}"></div>
+      </div>
     `;
 
     document.getElementById('adUploadBtn-' + key).addEventListener('click', () => toggleUploadForm(key));
+
+    document.getElementById('adLybuntUploadBtn-' + key).addEventListener('click', () => {
+      document.getElementById('adLybuntUploadInput-' + key).click();
+    });
+    document.getElementById('adLybuntUploadInput-' + key).addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) handleLybuntUpload(key, file);
+      e.target.value = '';
+    });
+    document.getElementById('adLybuntClear-' + key).addEventListener('click', async () => {
+      if (!isAdmin()) { alert('Only an admin can clear LYBUNTS data.'); return; }
+      if (!state.lybunts[key].length) return;
+      if (!confirm(`Clear all LYBUNTS data for the ${info.label}? This can't be undone.`)) return;
+      state.lybunts[key] = [];
+      await save('lybunts');
+      renderLybuntTable(key);
+      logActivity(`cleared LYBUNTS data in ${info.label}`);
+    });
+    document.getElementById('adLybuntSearch-' + key).addEventListener('input', (e) => {
+      lybuntFilters[key].search = e.target.value;
+      renderLybuntTable(key);
+    });
+    document.getElementById('adLybuntMonth-' + key).addEventListener('change', (e) => {
+      lybuntFilters[key].month = e.target.value;
+      renderLybuntTable(key);
+    });
+    document.getElementById('adLybuntYear-' + key).addEventListener('input', (e) => {
+      lybuntFilters[key].year = e.target.value.trim();
+      renderLybuntTable(key);
+    });
+    document.getElementById('adLybuntClearFilters-' + key).addEventListener('click', () => {
+      lybuntFilters[key] = { search: '', month: '', year: '' };
+      document.getElementById('adLybuntSearch-' + key).value = '';
+      document.getElementById('adLybuntMonth-' + key).value = '';
+      document.getElementById('adLybuntYear-' + key).value = '';
+      renderLybuntTable(key);
+    });
 
     document.getElementById('adCampaignTable-' + key).addEventListener('click', async (e) => {
       const btn = e.target.closest('.ad-tag-btn');
@@ -1505,8 +1584,12 @@ Email: caok@wharton.upenn.edu</div>
       campaignFilters[key].tag = e.target.value;
       renderCampaignTable(key);
     });
+    document.getElementById('adShowAllBtn-' + key).addEventListener('click', () => {
+      campaignFilters[key].showAll = !campaignFilters[key].showAll;
+      renderCampaignTable(key);
+    });
     document.getElementById('adFilterClear-' + key).addEventListener('click', () => {
-      campaignFilters[key] = { search: '', from: '', to: '', batch: '', tag: '' };
+      campaignFilters[key] = { search: '', from: '', to: '', batch: '', tag: '', showAll: false };
       document.getElementById('adFilterSearch-' + key).value = '';
       document.getElementById('adFilterFrom-' + key).value = '';
       document.getElementById('adFilterTo-' + key).value = '';
@@ -1519,6 +1602,7 @@ Email: caok@wharton.upenn.edu</div>
     renderCampaignTable(key);
     renderRequestList(key);
     renderDonorHighlights(key);
+    renderLybuntTable(key);
   }
 
   function toggleUploadForm(key) {
@@ -1604,12 +1688,23 @@ Email: caok@wharton.upenn.edu</div>
     }).join('');
   }
 
+  function mostRecentReportDate(key) {
+    const dates = (state.donorRows[key] || []).map(r => r._reportDate).filter(Boolean).sort();
+    return dates.length ? dates[dates.length - 1] : null;
+  }
+
   function getFilteredCampaignRows(key) {
     const f = campaignFilters[key];
     let rows = state.donorRows[key] || [];
-    if (f.batch) rows = rows.filter(r => r._reportDate === f.batch);
-    if (f.from) rows = rows.filter(r => r._reportDate && r._reportDate >= f.from);
-    if (f.to) rows = rows.filter(r => r._reportDate && r._reportDate <= f.to);
+    const manualDateFilter = !!(f.batch || f.from || f.to);
+    if (!f.showAll && !manualDateFilter) {
+      const recent = mostRecentReportDate(key);
+      if (recent) rows = rows.filter(r => r._reportDate === recent);
+    } else {
+      if (f.batch) rows = rows.filter(r => r._reportDate === f.batch);
+      if (f.from) rows = rows.filter(r => r._reportDate && r._reportDate >= f.from);
+      if (f.to) rows = rows.filter(r => r._reportDate && r._reportDate <= f.to);
+    }
     if (f.tag === '__untagged') rows = rows.filter(r => !r._tag);
     else if (f.tag) rows = rows.filter(r => r._tag === f.tag);
     if (f.search) {
@@ -1645,10 +1740,159 @@ Email: caok@wharton.upenn.edu</div>
     return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  function amountToNumber(v) {
+    if (v === undefined || v === null || v === '') return 0;
+    const num = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+    return isNaN(num) ? 0 : num;
+  }
+
+  // ---------- LYBUNTS ----------
+  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const lybuntFilters = {
+    annual: { search: '', month: '', year: '' },
+    capital: { search: '', month: '', year: '' },
+  };
+
+  function detectLybuntColumns(cols) {
+    const find = (re, list) => (list || cols).find(c => re.test(c));
+    const fullNameCol = find(/full\s*name/i) || find(/donor\s*name/i) || find(/^name$/i) || cols[0];
+    const addressCol = find(/mailing\s*address/i) || find(/^address/i) || find(/street/i);
+    const dateCol = find(/last\s*gift\s*date/i) || find(/gift\s*date/i) || find(/^date$/i) || find(/last.*date/i);
+    const remaining = cols.filter(c => c !== dateCol);
+    const amountCol = find(/last\s*gift\s*amount/i, remaining) || find(/gift\s*amount/i, remaining) || find(/amount/i, remaining) || find(/last\s*gift/i, remaining) || find(/\$/, remaining);
+    return { fullNameCol, addressCol, amountCol, dateCol };
+  }
+
+  // Parses Date objects, Excel serial numbers, or mm/dd/yy(yy) strings.
+  function parseGiftDate(v) {
+    if (v instanceof Date && !isNaN(v)) return { month: v.getMonth() + 1, year: v.getFullYear() };
+    if (typeof v === 'number') {
+      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      if (!isNaN(d)) return { month: d.getUTCMonth() + 1, year: d.getUTCFullYear() };
+    }
+    const s = String(v || '').trim();
+    const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      const mm = parseInt(m[1], 10);
+      let yy = parseInt(m[3], 10);
+      if (m[3].length === 2) yy += (yy < 50 ? 2000 : 1900);
+      return { month: mm, year: yy };
+    }
+    return { month: null, year: null };
+  }
+
+  function formatGiftDateDisplay(v) {
+    if (v instanceof Date && !isNaN(v)) return (v.getMonth() + 1) + '/' + v.getDate() + '/' + String(v.getFullYear()).slice(-2);
+    if (typeof v === 'number') {
+      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      if (!isNaN(d)) return (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '/' + String(d.getUTCFullYear()).slice(-2);
+    }
+    return String(v === undefined || v === null ? '' : v);
+  }
+
+  function handleLybuntUpload(key, file) {
+    const meta = document.getElementById('adLybuntMeta-' + key);
+    meta.textContent = 'Reading ' + file.name + '…';
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+        if (!rawRows.length) { meta.textContent = 'No rows found in ' + file.name + '.'; return; }
+        const rawCols = [];
+        rawRows.forEach(r => Object.keys(r).forEach(c => { if (rawCols.indexOf(c) === -1) rawCols.push(c); }));
+        const { fullNameCol, addressCol, amountCol, dateCol } = detectLybuntColumns(rawCols);
+        const uploadedAt = todayStr();
+        const converted = rawRows.map(r => {
+          const dateRaw = dateCol ? r[dateCol] : '';
+          const parsed = parseGiftDate(dateRaw);
+          return {
+            fullName: fullNameCol ? String(r[fullNameCol] === undefined ? '' : r[fullNameCol]) : '',
+            address: addressCol ? String(r[addressCol] === undefined ? '' : r[addressCol]) : '',
+            giftAmount: amountCol ? r[amountCol] : '',
+            giftDate: dateCol ? formatGiftDateDisplay(dateRaw) : '',
+            _month: parsed.month, _year: parsed.year,
+            _rowId: uid(), _uploadedAt: uploadedAt, _fileName: file.name, _uploadedBy: currentUser.name,
+          };
+        });
+        state.lybunts[key] = state.lybunts[key].concat(converted);
+        await save('lybunts');
+        meta.textContent = `Added ${rawRows.length} row${rawRows.length === 1 ? '' : 's'} from ${file.name}`;
+        renderLybuntTable(key);
+        logActivity(`uploaded a LYBUNTS file to ${CAMPAIGN_INFO[key].label} (${rawRows.length} rows)`);
+      } catch (err) {
+        meta.textContent = 'Could not read that file — please upload a CSV or Excel export.';
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function getFilteredLybunts(key) {
+    const f = lybuntFilters[key];
+    let rows = state.lybunts[key] || [];
+    if (f.month) rows = rows.filter(r => String(r._month) === String(f.month));
+    if (f.year) rows = rows.filter(r => String(r._year) === String(f.year));
+    if (f.search) {
+      const q = f.search.toLowerCase();
+      rows = rows.filter(r => [r.fullName, r.address, r.giftAmount, r.giftDate]
+        .some(v => String(v === undefined || v === null ? '' : v).toLowerCase().indexOf(q) !== -1));
+    }
+    return rows;
+  }
+
+  function renderLybuntTable(key) {
+    const container = document.getElementById('adLybuntTable-' + key);
+    const totalEl = document.getElementById('adLybuntTotal-' + key);
+    const allRows = state.lybunts[key] || [];
+    if (!allRows.length) {
+      container.innerHTML = '<div class="ad-empty">No LYBUNTS file uploaded yet.</div>';
+      if (totalEl) totalEl.textContent = '';
+      return;
+    }
+    const rows = getFilteredLybunts(key);
+    const total = rows.reduce((sum, r) => sum + amountToNumber(r.giftAmount), 0);
+    const f = lybuntFilters[key];
+    if (totalEl) {
+      const scopeLabel = f.month ? (MONTH_NAMES[f.month - 1] + (f.year ? ' ' + f.year : '')) : (f.year ? f.year : 'all records');
+      totalEl.textContent = `${rows.length} donor${rows.length === 1 ? '' : 's'} · Total gifts (${scopeLabel}): ${fmtCurrency(total)}`;
+    }
+    if (!rows.length) { container.innerHTML = '<div class="ad-empty">No rows match these filters.</div>'; return; }
+    let html = '<div class="ad-spreadsheet-wrap"><table class="ad-spreadsheet"><thead><tr><th>Full Name</th><th>Address</th><th>Last Gift</th><th>Date</th></tr></thead><tbody>';
+    rows.forEach(r => {
+      html += `<tr><td>${esc(r.fullName || '')}</td><td>${esc(r.address || '')}</td><td>${esc(fmtCurrency(r.giftAmount))}</td><td>${esc(r.giftDate || '')}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+  }
+
   function renderCampaignTable(key) {
     const container = document.getElementById('adCampaignTable-' + key);
+    const scopeNote = document.getElementById('adTableScopeNote-' + key);
+    const showAllBtn = document.getElementById('adShowAllBtn-' + key);
     const allRows = state.donorRows[key] || [];
-    if (!allRows.length) { container.innerHTML = '<div class="ad-empty">No reports uploaded yet.</div>'; return; }
+    if (!allRows.length) {
+      container.innerHTML = '<div class="ad-empty">No reports uploaded yet.</div>';
+      if (scopeNote) scopeNote.textContent = '';
+      return;
+    }
+    const f = campaignFilters[key];
+    const manualDateFilter = !!(f.batch || f.from || f.to);
+    const recent = mostRecentReportDate(key);
+    if (showAllBtn) {
+      showAllBtn.textContent = f.showAll ? 'Show Recent Only' : 'Show All';
+      showAllBtn.classList.toggle('ad-toggle-active', f.showAll);
+    }
+    if (scopeNote) {
+      if (!f.showAll && !manualDateFilter && recent) {
+        scopeNote.textContent = `Showing most recent upload — week of ${fmtDate(recent)}. Click "Show All" to see every report ever uploaded.`;
+      } else if (f.showAll) {
+        scopeNote.textContent = 'Showing all uploaded reports, every week.';
+      } else {
+        scopeNote.textContent = '';
+      }
+    }
     const rows = getFilteredCampaignRows(key);
     if (!rows.length) { container.innerHTML = '<div class="ad-empty">No rows match these filters.</div>'; return; }
     let html = '<div class="ad-spreadsheet-wrap"><table class="ad-spreadsheet"><thead><tr>';
