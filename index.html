@@ -1852,8 +1852,11 @@ Email: caok@wharton.upenn.edu</div>
   // City, State ZIP
   // $Amount + Date  (glued together with no space, ends the record)
   // Records with no address (e.g. "Anonymous") skip straight from name to $Amount+Date.
-  // Extract lines top-to-bottom, left-to-right, inserting a space wherever there's
-  // a visible gap between text runs.
+  //
+  // Rather than re-sorting text by (x, y) position — which can silently
+  // scramble line order when a report's rows vary in height (e.g. addresses
+  // that wrap to a second line) — this trusts pdf.js's own line-break signal
+  // (`hasEOL`), which reflects the PDF's actual internal text stream order.
   async function extractPdfLines(file) {
     const buf = await file.arrayBuffer();
     const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -1861,27 +1864,24 @@ Email: caok@wharton.upenn.edu</div>
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      const items = content.items
-        .filter(it => it.str && it.str.trim().length)
-        .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], width: it.width }));
-      const rows = {};
-      items.forEach(it => {
-        const key = Math.round(it.y / 2) * 2;
-        (rows[key] = rows[key] || []).push(it);
-      });
-      const ys = Object.keys(rows).map(Number).sort((a, b) => b - a);
-      ys.forEach(y => {
-        const rowItems = rows[y].sort((a, b) => a.x - b.x);
-        let line = '';
-        let lastEndX = null;
-        rowItems.forEach(it => {
-          if (lastEndX !== null && (it.x - lastEndX) > 1) line += ' ';
-          line += it.str;
+      let current = '';
+      let lastEndX = null;
+      content.items.forEach(it => {
+        if (!it.str) return;
+        const x = it.transform[4];
+        if (it.str.trim().length) {
+          if (lastEndX !== null && (x - lastEndX) > 1) current += ' ';
+          current += it.str;
           const w = typeof it.width === 'number' && it.width > 0 ? it.width : it.str.length * 4.3;
-          lastEndX = it.x + w;
-        });
-        allLines.push(line.trim());
+          lastEndX = x + w;
+        }
+        if (it.hasEOL) {
+          if (current.trim()) allLines.push(current.trim());
+          current = '';
+          lastEndX = null;
+        }
       });
+      if (current.trim()) allLines.push(current.trim());
     }
     return allLines;
   }
@@ -1949,8 +1949,9 @@ Email: caok@wharton.upenn.edu</div>
       if (!window.pdfjsLib) { meta.textContent = 'PDF reader failed to load — try refreshing the page.'; return; }
       const lines = await extractPdfLines(file);
       const parsed = parseLybuntPdfLines(lines);
+      console.log('LYBUNTS PDF —', file.name, '— raw extracted lines:', lines);
+      console.log('LYBUNTS PDF —', file.name, '— parsed records:', parsed);
       if (!parsed.length) {
-        console.log('LYBUNTS PDF — no donor-shaped records found. Raw extracted lines:', lines);
         meta.textContent = `Couldn't find any donor records in ${file.name}. Check the browser console (right-click → Inspect → Console) for the raw text — this PDF's layout may need a small adjustment.`;
         return;
       }
